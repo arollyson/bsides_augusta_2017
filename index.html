@@ -1,0 +1,375 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+		<title>Wrangling SIEM Data</title>
+
+		<link rel="stylesheet" href="css/reveal.css">
+		<link rel="stylesheet" href="css/theme/league.css">
+
+		<!-- Theme used for syntax highlighting of code -->
+		<link rel="stylesheet" href="lib/css/zenburn.css">
+        <script>
+            var link = document.createElement( 'link' );
+            link.rel = 'stylesheet';
+            link.type = 'text/css';
+            link.href = window.location.search.match( /print-pdf/gi ) ? 'css/print/pdf.css' : 'css/print/paper.css';
+            document.getElementsByTagName( 'head' )[0].appendChild( link );
+        </script>
+	</head>
+	<body>
+		<div class="reveal">
+			<div class="slides">
+				<section data-markdown>
+					## Automating Event Log Production and Testing for Detection
+					or at least making it slightly less painful
+				</section>
+				<section data-markdown>
+					## Me
+
+					Alek Rollyson
+
+					Detection @ FireEye Labs
+
+					Threat Analytics Platform (TAP)
+				</section>
+                <section data-markdown>
+                    ## Day to Day
+                    * Create detection for events 
+                        * windows, *nix, network, cloud, application, ICS, etc
+                    * Developing tools to keep headaches to a minimum
+
+                    Note:
+                    * malware, attacker activity, data protection, operational concerns, etc
+                    * Creating detection == why generating events are important. We have to recreate detection scenarios for testing data
+                </section>
+                <section data-markdown>
+                    ## Short Team Background
+                    * Detection for wide variety of customers
+                        * Have to stay as generic as possible
+                    * Robust quality control setup
+                        * Unit testing for every rule
+                </section>
+                <section data-markdown>
+                    ## Quality Control
+                    * Git + topic branches
+                    * New rules ↦ topic branch ↦ GitHub pull request
+                    * PR standard template includes 3 things:
+                        * Validation results
+                        * Unit testing results
+                        * Historical checks
+                    * PRs are peer reviewed
+                    * Full rule publishes require full ruleset validation and tests
+
+                    Note:
+                    * We run our rule content development like a lightweight development shop
+                    * Rules are JSON, the detection itself is just a query string but we keep all kinds of metata in the rule json as well
+                    * Because we're confident in our review data we can rapidly publish changes, sometimes multiple times per day
+                </section>
+                <section data-markdown>
+                    ## High Level Pipeline
+                    Log Sender
+
+                    ↧
+
+                    Log Receiver
+
+                    ↧
+
+                    Ingestion (Rules get applied here)
+
+                    ↧
+
+                    Storage
+
+                    Note:
+                    * Nothing novel about this, only important because of where the rules application takes place
+                </section>
+                <section data-markdown>
+                    ## Tip
+                    Applying rules during ingest
+
+                    =
+
+                    searchable rule decoration
+
+                    Note:
+                    * When I say decoration I mean inserting matched rule metadata into events
+                    * Detection as decoration allows us to make it searchable data like any other event value
+                </section> 
+                <section data-markdown>
+                    ## Problem
+                    Generating event logs for detection scenarios can be manually intensive and annoying
+                    
+                    Note:
+                    * Recreating attack scenarios sometimes isn't trivial (setting up the lab and collecting the actual events)
+                    * Analysts maintaining their own setups can be cumbersome
+                    * Could devops, but why not centralize
+                </section>
+                <section data-markdown>
+                    ## Focus Today
+                    * Network event data
+                    * Windows host data
+
+                    Note:
+                    * We work with every kind of network event log under the sun
+                    * Only going to be focusing on network and Windows host data today
+                    * Other event types (AWS for example), have their own hurdles but these affect most of people's use cases
+                </section> 
+                <section data-markdown>
+                    ## Automating Network Event Logs
+                    * Bro is your friend
+                        * Easy to set up and parse
+                        * Supports lots of data types
+
+                    Note:
+                    * Regardless of what proxy you use or if you use Bro in product it makes an excellent choice for generating test data
+                    * Supports lots of different data types, likely many more than your proxy does
+                    * Proper parsing and normalization means it shoudn't matter what you actually use, fields should still map
+                    * Now we could have every analyst install Bro and maintain their configs OR ...
+                </section>
+                <section data-markdown>
+                    ## Introducing Brocapi
+                    https://github.com/fireeye/brocapi
+                    * HTTP API for mass Bro PCAP processing
+                        * POST PCAPs -> Invoke Bro -> Submit to syslog
+                        * Optional tagging via POST form data
+
+                    Note:
+                    * Invokes bro locally via subprocess (might be a better way to do this via some like brocolli, but this works)
+                    * Only have to maintain Bro configs in one place
+                    * If an SE comes to you and wants to know if you have detection for something, "send a PCAP here and see"
+                    * We could just provide one API where analysts can submit PCAPS and get the same output every time
+                </section>
+                <section data-markdown>
+                    ## Brocapi Internals
+                    * HTTP API
+                        * Flask App
+                        * POST /submit/pcap
+                        * Queues job in Redis
+                    * RQ (Redis Queue) Worker Queue
+                        * Runs submitted PCAPs through Bro
+                        * Stores logs locally
+                        * Submits logs to Syslog server
+
+                    Note:
+                    * This is possibly over-complicated for simple situations, but scaled well to processing hundreds of PCAPs at a time
+                    * I'm sure some are groaning about the Redis req, but RQ was simple/quick/easy
+                    * Can be deployed in multiple ways
+                        * Invoked directly and it will just run as a flask app
+                        * Run as WSGI application (gunicon, uwsgi)
+                        * Worker run under Supervisord (process control system)
+                    * Wrapped in systemd
+                    * Included example configuration files for all of the above in the repo
+                </section> 
+                <section>
+                    <pre><code data-trim data-noescape>
+                        $ curl -X POST -F 'file[]=@foo.pcap' -F 'tag=evil' \
+                            http://127.0.0.1/submit/pcap
+                    </code></pre>
+                    <pre><code data-trim data-noescape>
+                        {
+                          "status": "job queued",
+                          "files": [
+                            "foo.pcap"
+                          ],
+                          "tag": "evil",
+                          "job_id": "507965ab-6511-4cd4-9542-4671eb140f92",
+                          "success": true
+                        }
+                    </code></pre>
+                    <aside class="notes">
+                        POST params: files suppled via "file" array, tag is supplied via "tag" param. "Rawmsghostname" is just our taxonomy field for the syslog hostname.
+                    </aside>
+                </section>
+                <section>
+                    <pre><code class="nohighlight" data-trim data-noescape>
+                        jobs
+                        └── 507965ab-6511-4cd4-9542-4671eb140f92
+                            ├── logs
+                            │   ├── bro
+                            │   │   ├── conn.log
+                            │   │   ├── dhcp.log
+                            │   │   ├── dns.log
+                            │   │   ├── files.log
+                            │   │   ├── http.log
+                            │   │   ├── ssl.log
+                            │   │   ├── weird.log
+                            │   │   └── x509.log
+                            │   └── syslog
+                            └── pcaps
+                                └── foo.pcap
+                    </code></pre>
+                    <aside class="notes">
+                        This is what the directory storage structure looks like after a request is finished
+                    </aside>
+                </section>    
+                <section>
+                    <29>Sep 01 15:40:33 <mark>evil</mark> bro_http:  ...
+                    <p></p>
+                    rawmsghostname=evil
+                    <aside class="notes">
+                        The "evil" value is how we're tagging events, by rewriting the syslog hostname. 
+                        <pre>   </pre>
+                        "bro_http" is less important, but its the configured program value which may be important for your parsing
+                    </aside>
+                </section>
+                <section data-markdown>
+                    ### Tip
+                    * Further subdivide your input by prepending tags
+                        * evil-1, evil-2, evil-3, etc
+                        * This way you can differentiate by specific PCAP
+                    * Useful with prefix search: __rawmsghostname:evil*__
+
+                    Note:
+                    * We do all of this automatically with our submission scripts
+                    * I haven't released these yet because they have a lot of internally specific nuances
+                    * I'll work on getting a generic client script out, but really it's just a python requests wrapper
+                </section>
+                <section data-markdown>
+                    ## Uses
+                    * Quick detection verification
+                    * Reliable/reproduceable test production
+                    * Building block for further automation
+                        * Scrape PCAPs from feeds -> Brocapi -> log storage -> search
+
+                    Note:
+                    * Because we can uniquely tag our input, we can automate actions with our output
+                    * If we have detection decoration (or even an alert db with an api), we can automatically check output
+                    * Automatically pull out interesting traffic in event logs
+                </section>
+                <section>
+                    Now lets do the same thing with Windows host logs
+                </section>
+                <section data-markdown>
+                    ### Generating host logs is more of a pain
+                    * Requires more initial setup
+                    * More overhead in maintaining VMs
+                    * Lots of options for configuration and delivery
+                </section> 
+                <section data-markdown>
+                    ### My 2 cents on host configuration itself
+                    * Use Sysmon
+                        * Check out TaySwift's config: https://github.com/SwiftOnSecurity/sysmon-config
+                    * I suggest using NxLog as a sender (you'll see why in a second)
+                        * https://nxlog.co/products/nxlog-community-edition
+                    * Send your logs in JSON format
+                        * Higher verbosity
+                        * You're not a parsing masochist
+
+                    Note:
+                    * Beating a dead horse but I can't recommend sysmon enough. It's Bro for host data: highly configurable, verbose data
+                    * TaySwift's config is a great starting point, it leaves a lot of stuff disable that can probably be re-enabled since we're talking about analysis systems and not prod
+                    * JSON! Seriously, who wants to spend time parsing tab-delimited formats when you could get your data pre-serialized
+                </section>
+                <section data-markdown>
+                    ## Let's Automate
+                    Using Cuckoo!
+                </section>
+                <section data-markdown>
+                    ### Introducing TagHost
+                    https://github.com/cuckoosandbox/cuckoo/pull/1844
+                    https://github.com/arollyson/cuckoo/tree/taghost
+                    * Cuckoo guest auxiliary module
+                        * Rewrites the NxLog $hostname value with a user-provided tag
+                        * Kicks the NxLog service to apply the new config
+                        * Now our hostname value == our tag, so we can easily search the resulting logs from analysis runs
+
+                    Note:
+                    * There may be a better way to do this, I used NxLog because we suggest it to customers and use it internally
+                    * Easy to configure, has a service that can be kicked via API, takes immediate effect on service restart
+                    * Hasn't been merged into the main project (and very well might not be), but you're welcome to include it yourself in the meantime
+                </section> 
+                <section>
+                    <pre><code data-trim data-noescape>
+                    curl -F file=@file -F options="tag_host=evil" http://cuckoo-api
+                    </code></pre>
+                    hostname=evil
+                </section>
+                <section data-markdown>
+                    ### Uses (basically the same as Brocapi)
+                    * Quick detection verification
+                    * Reliable/reproduceable test production
+                    * Building block for further automation
+                        * Scrape samples from feeds -> Cuckoo -> log storage -> search
+
+                    Note:
+                    * This is the same idea that we explored with network data earlier, because we have uniquely tagged input we can automate
+                    * Summarize host behavior (by event id, by process, by owner, etc, etc)
+                    * The previous unique suffix tip from Brocapi applies here as well, hostname=evil-1, hostname=evil-2, etc
+                </section>
+                <section data-markdown>
+                    ### Tip
+                    * If you have some commands you want log output for (say a set of attacker activity from an intel report)
+                    * Toss the commands in a .bat file and submit it to Cuckoo
+                </section>
+                <section data-markdown>
+                    ### How else do we make our lives easier?
+                    By sharing!
+                </section>
+                <section data-markdown>
+                    ## Windows Reference Events
+                    * Collection of windows behavior log samples
+                    * Public references for all of them
+                    * We'll continue releasing as we find them
+                    * Feel free to submit a PR
+
+                    Note:
+                    * We went through all collection of windows "methodology" event samples
+                    * Releasing all the ones we could find specific public references for
+                    * No reason for all of us to be duplicating effort for things that should be public reference
+                </section>
+                <section tagcloud bw>
+                    Delete prefetch
+                    Timestomping
+                    Vssadmin activity
+                    DISMHost UAC bypass
+                    PTH failure
+                    Net use IPC
+                    WinRM autostart
+                    Bitsadmin transfer
+                    WMI perisistence
+                    Powershell
+                    Process relationships
+                    Invoke Mimikatz
+                </section>
+                <section data-markdown>
+                    ## Thanks
+                    * Dustin Seibel
+                    * Patrick Perry
+                    * Chris Sanders
+                    * Jason Smith
+                    * Chris Golea
+                    * Bryon Wolcott
+
+                    Note:
+                    * Team members who've directly or indirectly helped out with stuff in this presentation
+                    * Specific references for the event log references are included in the repo (a lot of tweets and blog posts from you guys)
+                </section>
+                <section data-markdown>
+                    # Questions?
+                </section>
+			</div>
+		</div>
+
+		<script src="lib/js/head.min.js"></script>
+		<script src="js/reveal.js"></script>
+
+		<script>
+			// More info about config & dependencies:
+			// - https://github.com/hakimel/reveal.js#configuration
+			// - https://github.com/hakimel/reveal.js#dependencies
+			Reveal.initialize({
+				dependencies: [
+                    { src: 'plugin/tagcloud/tagcloud.js', async: true },
+					{ src: 'plugin/markdown/marked.js' },
+					{ src: 'plugin/markdown/markdown.js' },
+					{ src: 'plugin/notes/notes.js', async: true },
+					{ src: 'plugin/highlight/highlight.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } }
+				]
+			});
+		</script>
+	</body>
+</html>
